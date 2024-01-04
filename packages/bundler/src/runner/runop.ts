@@ -12,10 +12,12 @@ import { formatEther, keccak256, parseEther } from 'ethers/lib/utils'
 import { Command } from 'commander'
 import { erc4337RuntimeVersion } from '@account-abstraction/utils'
 import fs from 'fs'
-import { DeterministicDeployer, HttpRpcClient, SimpleAccountAPI } from '@account-abstraction/sdk'
+import { DeterministicDeployer, HttpRpcClient, SimpleAccountAPI,PaymasterAPI } from '@account-abstraction/sdk'
 import { runBundler } from '../runBundler'
 import { BundlerServer } from '../BundlerServer'
 import { getNetworkProvider } from '../Config'
+
+import {VerifyingPaymasterAPI} from './vp'
 
 const ENTRY_POINT = '0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789'
 
@@ -45,6 +47,8 @@ class Runner {
   }
 
   async init (deploymentSigner?: Signer): Promise<this> {
+    console.log('getting net')
+
     const net = await this.provider.getNetwork()
     const chainId = net.chainId
     const dep = new DeterministicDeployer(this.provider)
@@ -65,6 +69,7 @@ class Runner {
       factoryAddress: accountDeployer,
       owner: this.accountOwner,
       index: this.index,
+      paymasterAPI: new VerifyingPaymasterAPI('http://localhost:8888/rpc/1234567890', this.entryPointAddress), //167.235.59.160 , https://api.pimlico.io/v2/goerli/rpc?apikey=b6fc4a68-7e3a-4e0f-a413-b1372d13e73d, http://localhost:8888/rpc/1234567890
       overheads: {
         // perUserOp: 100000
       }
@@ -84,10 +89,18 @@ class Runner {
   }
 
   async runUserOp (target: string, data: string): Promise<void> {
-    const userOp = await this.accountApi.createSignedUserOp({
+    const gasLimit = BigNumber.from('33100')
+
+    const unsigned = await this.accountApi.createUnsignedUserOp({
       target,
-      data
+      data,
+      gasLimit
     })
+
+    unsigned.preVerificationGas = 52304
+    const userOp = await this.accountApi.signUserOp(unsigned)
+
+    console.log('signed userop', userOp)
     try {
       const userOpHash = await this.bundlerProvider.sendUserOpToBundler(userOp)
       const txid = await this.accountApi.getUserOpReceipt(userOpHash)
@@ -137,6 +150,8 @@ async function main (): Promise<void> {
     bundler = await runBundler(argv)
     await bundler.asyncStart()
   }
+
+  console.log(opts)
   if (opts.mnemonic != null) {
     signer = Wallet.fromMnemonic(fs.readFileSync(opts.mnemonic, 'ascii').trim()).connect(provider)
   } else {
@@ -158,11 +173,16 @@ async function main (): Promise<void> {
   }
   const accountOwner = new Wallet('0x'.padEnd(66, '7'))
 
-  const index = opts.nonce ?? Date.now()
+  console.log('accountOwner', accountOwner)
+  const index = 1702452956904
   console.log('using account index=', index)
   const client = await new Runner(provider, opts.bundlerUrl, accountOwner, opts.entryPoint, index).init(deployFactory ? signer : undefined)
+  console.log('runner')
 
   const addr = await client.getAddress()
+
+  console.log('addr', addr)
+
 
   async function isDeployed (addr: string): Promise<boolean> {
     return await provider.getCode(addr).then(code => code !== '0x')
@@ -176,8 +196,12 @@ async function main (): Promise<void> {
   console.log('account address', addr, 'deployed=', await isDeployed(addr), 'bal=', formatEther(bal))
   const gasPrice = await provider.getGasPrice()
   // TODO: actual required val
-  const requiredBalance = gasPrice.mul(4e6)
+  console.log("gasPrice",gasPrice)
+  let requiredBalance = gasPrice.mul(4e8).mul(4e4)
+  console.log("requiredBalance",requiredBalance)
+
   if (bal.lt(requiredBalance.div(2))) {
+    requiredBalance = requiredBalance.add(requiredBalance)
     console.log('funding account to', requiredBalance.toString())
     await signer.sendTransaction({
       to: addr,
@@ -187,13 +211,15 @@ async function main (): Promise<void> {
     console.log('not funding account. balance is enough')
   }
 
-  const dest = addr
-  const data = keccak256(Buffer.from('entryPoint()')).slice(0, 10)
+  
+  // const dest = addr
+  // const data = keccak256(Buffer.from('entryPoint()')).slice(0, 10)
+  const data = '0x49ae115700000000000000000000000084ca8bc7997272c7cfb4d0cd3d55cd942b3c941900000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000065954d780000000000000000000000000000000000000000000000000000000000000008457468657265756d000000000000000000000000000000000000000000000000'
   console.log('data=', data)
-  await client.runUserOp(dest, data)
+  await client.runUserOp('0xb3f90a45f7b685da039b79516dddfc9e5e0020a0', data)
   console.log('after run1')
   // client.accountApi.overheads!.perUserOp = 30000
-  await client.runUserOp(dest, data)
+  // await client.runUserOp(dest, data)
   console.log('after run2')
   await bundler?.stop()
 }
